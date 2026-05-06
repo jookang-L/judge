@@ -14,6 +14,34 @@ type Body = {
   precedentDetail?: PrecedentDetail;
 };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isRetryableProviderError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("503") ||
+    lower.includes("unavailable") ||
+    lower.includes("high demand") ||
+    lower.includes("temporarily") ||
+    lower.includes("try again later")
+  );
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
@@ -71,17 +99,63 @@ ${precedentDetail.fullText}
 `.trim();
 
     const ai = createGeminiClient(apiKey);
-    const response = await ai.models.generateContent({
-      model: GEMINI_DEFAULT_MODEL,
-      contents: prompt,
-    });
-    const text = response.text ?? "";
-    const jsonText = extractJsonFromResponse(text);
-    const parsed = JSON.parse(jsonText);
+    let lastErrorMessage = "";
+    let parsed: unknown = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const response = await ai.models.generateContent({
+          model: GEMINI_DEFAULT_MODEL,
+          contents: prompt,
+        });
+        const text = response.text ?? "";
+        const jsonText = extractJsonFromResponse(text);
+        parsed = JSON.parse(jsonText);
+        break;
+      } catch (error) {
+        const message = extractErrorMessage(error);
+        lastErrorMessage = message;
+        if (!isRetryableProviderError(message) || attempt === 3) {
+          throw error;
+        }
+        await sleep(800 * attempt);
+      }
+    }
+
+    if (!parsed) {
+      throw new Error(lastErrorMessage || "판례 요약 AI 분석 결과가 비어 있습니다.");
+    }
+
     return NextResponse.json({ data: parsed });
-  } catch {
+  } catch (error) {
+    const message = extractErrorMessage(error);
+    if (isRetryableProviderError(message)) {
+      return NextResponse.json(
+        {
+          error:
+            "현재 AI 모델 요청이 많아 잠시 지연되고 있습니다. 잠시 후 다시 시도해주세요.",
+        },
+        { status: 503 },
+      );
+    }
+    if (message.toLowerCase().includes("api key")) {
+      return NextResponse.json(
+        { error: "Gemini API 키가 올바르지 않거나 만료되었습니다. 설정에서 다시 확인해주세요." },
+        { status: 401 },
+      );
+    }
+    if (message.includes("JSON")) {
+      return NextResponse.json(
+        { error: "AI 응답 형식을 읽지 못했습니다. 잠시 후 다시 시도해주세요." },
+        { status: 502 },
+      );
+    }
+
     return NextResponse.json(
-      { error: "판례 요약 AI 분석에 실패했습니다. API 키와 네트워크를 확인해주세요." },
+      {
+        error:
+          "판례 요약 AI 분석에 실패했습니다. 네트워크 상태를 확인하고 다시 시도해주세요.",
+      },
       { status: 500 },
     );
   }
