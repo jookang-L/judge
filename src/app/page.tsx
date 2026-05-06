@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { AiSummaryPanel } from "@/components/ai-summary-panel";
 import { CaseTypeSelector } from "@/components/case-type-selector";
@@ -67,9 +67,9 @@ function createEmptyRecord(): SavedCaseRecord {
 export default function Home() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [geminiApiKey, setGeminiApiKey] = useState(() => loadGeminiApiKey());
-  const [lawApiKey, setLawApiKey] = useState(() => loadLawApiKey());
-  const [history, setHistory] = useState<SavedCaseRecord[]>(() => loadCaseHistory());
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [lawApiKey, setLawApiKey] = useState("");
+  const [history, setHistory] = useState<SavedCaseRecord[]>([]);
   const [record, setRecord] = useState<SavedCaseRecord>(createEmptyRecord);
   const [mainStep, setMainStep] = useState<MainStep>("caseType");
   const [questionIndex, setQuestionIndex] = useState(0);
@@ -78,6 +78,19 @@ export default function Home() {
   const [loadingPrecedentDetail, setLoadingPrecedentDetail] = useState(false);
   const [loadingVerdict, setLoadingVerdict] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+
+  const hydrateFromStorage = () => {
+    setGeminiApiKey(loadGeminiApiKey());
+    setLawApiKey(loadLawApiKey());
+    setHistory(loadCaseHistory());
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      hydrateFromStorage();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const questionAnswers = useMemo(
     () => record.answers ?? ({ ...EMPTY_ANSWERS } as QuestionAnswers),
@@ -518,6 +531,8 @@ export default function Home() {
               />
               <PrecedentSearchPanel
                 keywords={record.searchKeywords}
+                aiKeywordTerms={record.aiSummary.searchKeywords ?? []}
+                issueTerms={record.aiSummary.issues ?? []}
                 precedents={record.precedents}
                 selectedPrecedent={record.selectedPrecedent}
                 selectedPrecedentDetail={record.selectedPrecedentDetail}

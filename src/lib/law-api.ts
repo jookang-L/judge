@@ -15,6 +15,12 @@ function pickText(record: Record<string, unknown>, keys: string[]): string {
     if (typeof value === "string" && value.trim()) {
       return value.trim();
     }
+    if (typeof value === "number" || typeof value === "bigint") {
+      return String(value);
+    }
+    if (typeof value === "boolean") {
+      return value ? "true" : "false";
+    }
   }
   return "";
 }

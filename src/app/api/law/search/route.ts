@@ -8,6 +8,20 @@ type SearchBody = {
   lawApiKey?: string;
 };
 
+function buildFallbackKeywords(keywords: string[]): string[] {
+  const normalized = keywords
+    .flatMap((keyword) =>
+      keyword
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .map((part) => part.trim())
+        .filter((part) => part.length >= 2),
+    )
+    .slice(0, 8);
+
+  return Array.from(new Set([...keywords, ...normalized])).slice(0, 8);
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as SearchBody;
@@ -19,10 +33,16 @@ export async function POST(request: Request) {
       );
     }
 
+    const expandedKeywords = buildFallbackKeywords(keywords);
     const all = await Promise.all(
-      keywords.map((keyword) => searchPrecedentsByKeyword(keyword, body.lawApiKey)),
+      expandedKeywords.map((keyword) => searchPrecedentsByKeyword(keyword, body.lawApiKey)),
     );
-    const merged = all.flat();
+    let merged = all.flat();
+
+    if (merged.length === 0) {
+      // Fallback query to avoid empty UI when keyword quality is poor.
+      merged = await searchPrecedentsByKeyword("*", body.lawApiKey);
+    }
 
     const dedupMap = new Map<string, PrecedentItem>();
     for (const item of merged) {
