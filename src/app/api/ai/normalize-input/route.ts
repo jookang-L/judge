@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 
-import { buildCaseSummaryPrompt } from "@/lib/prompts";
 import {
   createGeminiClient,
   extractJsonFromResponse,
@@ -8,19 +7,31 @@ import {
   generateContentWithRetry,
   isRetryableModelError,
 } from "@/lib/gemini";
+import { buildNormalizeSingleInputPrompt } from "@/lib/prompts";
 import type { CaseType, LegalField, QuestionAnswers } from "@/types/case";
 
-type SummarizeBody = {
+type NormalizeInputBody = {
   apiKey?: string;
   selectedCaseType?: CaseType;
   selectedLegalFields?: LegalField[];
-  answers?: QuestionAnswers;
+  singleInput?: string;
 };
+
+function ensureRequiredAnswers(answers: QuestionAnswers): QuestionAnswers {
+  return {
+    people: answers.people?.trim() || "잘 모르겠음",
+    action: answers.action?.trim() || "잘 모르겠음",
+    timePlace: answers.timePlace?.trim() || "잘 모르겠음",
+    damage: answers.damage?.trim() || "잘 모르겠음",
+    reason: answers.reason?.trim() || "잘 모르겠음",
+    dispute: answers.dispute?.trim() || "잘 모르겠음",
+  };
+}
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as SummarizeBody;
-    const { apiKey, selectedCaseType, selectedLegalFields, answers } = body;
+    const body = (await request.json()) as NormalizeInputBody;
+    const { apiKey, selectedCaseType, selectedLegalFields, singleInput } = body;
 
     if (!apiKey?.trim()) {
       return NextResponse.json(
@@ -36,17 +47,14 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!answers?.people || !answers?.action || !answers?.timePlace || !answers?.damage || !answers?.reason) {
-      return NextResponse.json(
-        { error: "필수 질문 답변이 비어 있습니다. 사건 내용을 조금 더 작성해주세요." },
-        { status: 400 },
-      );
+    if (!singleInput?.trim()) {
+      return NextResponse.json({ error: "사건 내용을 입력해주세요." }, { status: 400 });
     }
 
-    const prompt = buildCaseSummaryPrompt({
+    const prompt = buildNormalizeSingleInputPrompt({
       selectedCaseType,
       selectedLegalFields: selectedLegalFields ?? [],
-      answers,
+      singleInput: singleInput.trim(),
     });
 
     const ai = createGeminiClient(apiKey);
@@ -57,9 +65,9 @@ export async function POST(request: Request) {
 
     const text = response.text ?? "";
     const jsonText = extractJsonFromResponse(text);
-    const parsed = JSON.parse(jsonText);
+    const parsed = JSON.parse(jsonText) as QuestionAnswers;
 
-    return NextResponse.json({ data: parsed });
+    return NextResponse.json({ data: ensureRequiredAnswers(parsed) });
   } catch (error) {
     const message = extractProviderErrorMessage(error);
 
@@ -88,7 +96,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      { error: message || "AI 사건 정리 요청에 실패했습니다." },
+      { error: message || "한 번에 입력 정리 요청에 실패했습니다." },
       { status: 500 },
     );
   }

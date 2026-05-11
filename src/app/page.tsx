@@ -4,9 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AiSummaryPanel } from "@/components/ai-summary-panel";
 import { CaseTypeSelector } from "@/components/case-type-selector";
+import { InputModeSelector } from "@/components/input-mode-selector";
 import { LegalFieldSelector } from "@/components/legal-field-selector";
 import { PrecedentSearchPanel } from "@/components/precedent-search-panel";
 import { QuestionStepper } from "@/components/question-stepper";
+import { SingleInputPanel } from "@/components/single-input-panel";
 import { SettingsModal } from "@/components/settings-modal";
 import { Sidebar } from "@/components/sidebar";
 import { EMPTY_ANSWERS, QUESTIONS, SAFETY_NOTICES } from "@/lib/constants";
@@ -28,8 +30,10 @@ import type {
   AiPrecedentSummary,
   AiResponsibilityAnalysis,
   AiSentencingAnalysis,
+  AiVerdictAnalysis,
   AiVerdict,
   CaseType,
+  InputMode,
   LegalField,
   PrecedentDetail,
   PrecedentItem,
@@ -40,7 +44,9 @@ import type {
 type MainStep =
   | "caseType"
   | "legalFields"
+  | "inputMode"
   | "questions"
+  | "singleInput"
   | "summary"
   | "precedentSearch";
 
@@ -57,6 +63,8 @@ function createEmptyRecord(): SavedCaseRecord {
     title: "새 사건",
     caseType: "모름",
     legalFields: ["모름"],
+    inputMode: "step",
+    singleInput: "",
     answers: { ...EMPTY_ANSWERS },
     searchKeywords: [],
     precedents: [],
@@ -76,7 +84,9 @@ export default function Home() {
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [loadingPrecedentSearch, setLoadingPrecedentSearch] = useState(false);
   const [loadingPrecedentDetail, setLoadingPrecedentDetail] = useState(false);
-  const [loadingVerdict, setLoadingVerdict] = useState(false);
+  const [loadingStandaloneVerdict, setLoadingStandaloneVerdict] = useState(false);
+  const [loadingPrecedentVerdict, setLoadingPrecedentVerdict] = useState(false);
+  const [summaryProgress, setSummaryProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
 
   const hydrateFromStorage = () => {
@@ -92,10 +102,44 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    if (!loadingSummary) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setSummaryProgress((prev) => {
+        if (prev >= 90) {
+          return 90;
+        }
+        const step = prev < 40 ? 6 : prev < 70 ? 4 : 2;
+        return Math.min(prev + step, 90);
+      });
+    }, 400);
+
+    return () => window.clearInterval(timer);
+  }, [loadingSummary]);
+
   const questionAnswers = useMemo(
     () => record.answers ?? ({ ...EMPTY_ANSWERS } as QuestionAnswers),
     [record.answers],
   );
+  const legacyPrecedentVerdictAnalysis = useMemo<AiVerdictAnalysis | undefined>(() => {
+    if (
+      !record.comparison ||
+      !record.responsibilityAnalysis ||
+      !record.sentencingAnalysis ||
+      !record.verdict
+    ) {
+      return undefined;
+    }
+    return {
+      comparison: record.comparison,
+      responsibilityAnalysis: record.responsibilityAnalysis,
+      sentencingAnalysis: record.sentencingAnalysis,
+      verdict: record.verdict,
+    };
+  }, [record]);
 
   const updateRecord = (next: Partial<SavedCaseRecord>) => {
     setRecord((prev) => ({
@@ -156,16 +200,68 @@ export default function Home() {
     await requestAiSummary();
   };
 
-  const requestAiSummary = async (overrideAnswers?: QuestionAnswers) => {
+  const handleSingleInputSubmit = async () => {
     if (!geminiApiKey.trim()) {
       setErrorMessage("AI 기능을 사용하려면 Gemini API 키를 먼저 입력해주세요.");
       setIsSettingsOpen(true);
       return;
     }
 
+    const inputText = (record.singleInput ?? "").trim();
+    if (!inputText) {
+      setErrorMessage("사건 내용을 한 번에 입력해주세요.");
+      return;
+    }
+
+    setSummaryProgress(8);
+    setLoadingSummary(true);
+    setErrorMessage("");
+    try {
+      const response = await fetch("/api/ai/normalize-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: geminiApiKey,
+          selectedCaseType: record.caseType,
+          selectedLegalFields: record.legalFields,
+          singleInput: inputText,
+        }),
+      });
+      const payload = (await response.json()) as {
+        data?: QuestionAnswers;
+        error?: string;
+      };
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "사건 입력 정리에 실패했습니다.");
+      }
+
+      await requestAiSummary(payload.data, { manageLoading: false });
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "사건 입력 정리에 실패했습니다.",
+      );
+    } finally {
+      setLoadingSummary(false);
+    }
+  };
+
+  const requestAiSummary = async (
+    overrideAnswers?: QuestionAnswers,
+    options?: { manageLoading?: boolean },
+  ) => {
+    if (!geminiApiKey.trim()) {
+      setErrorMessage("AI 기능을 사용하려면 Gemini API 키를 먼저 입력해주세요.");
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const manageLoading = options?.manageLoading ?? true;
     const answersForRequest = overrideAnswers ?? record.answers;
 
-    setLoadingSummary(true);
+    if (manageLoading) {
+      setSummaryProgress(8);
+      setLoadingSummary(true);
+    }
     setErrorMessage("");
     try {
       const response = await fetch("/api/ai/summarize", {
@@ -194,6 +290,12 @@ export default function Home() {
         title: payload.data.title || record.title,
         aiSummary: payload.data,
         searchKeywords: payload.data.searchKeywords ?? [],
+        standaloneVerdictAnalysis: undefined,
+        precedentVerdictAnalysis: undefined,
+        comparison: undefined,
+        responsibilityAnalysis: undefined,
+        sentencingAnalysis: undefined,
+        verdict: undefined,
         updatedAt: new Date().toISOString(),
       };
 
@@ -205,7 +307,9 @@ export default function Home() {
         error instanceof Error ? error.message : "AI 사건 정리에 실패했습니다.",
       );
     } finally {
-      setLoadingSummary(false);
+      if (manageLoading) {
+        setLoadingSummary(false);
+      }
     }
   };
 
@@ -254,6 +358,7 @@ export default function Home() {
         ...record,
         precedents: payload.data,
         searchKeywords: keywords,
+        precedentVerdictAnalysis: undefined,
         comparison: undefined,
         responsibilityAnalysis: undefined,
         sentencingAnalysis: undefined,
@@ -318,6 +423,7 @@ export default function Home() {
         selectedPrecedent: item,
         selectedPrecedentDetail: detailPayload.data,
         selectedPrecedentAiSummary: summaryPayload.data,
+        precedentVerdictAnalysis: undefined,
         comparison: undefined,
         responsibilityAnalysis: undefined,
         sentencingAnalysis: undefined,
@@ -335,18 +441,26 @@ export default function Home() {
     }
   };
 
-  const handleGenerateVerdict = async () => {
+  const requestVerdict = async (mode: "standalone" | "precedent") => {
     if (!geminiApiKey.trim()) {
       setErrorMessage("AI 판결문 생성을 위해 Gemini API 키가 필요합니다.");
       setIsSettingsOpen(true);
       return;
     }
-    if (!record.aiSummary || !record.selectedPrecedentAiSummary) {
+    if (!record.aiSummary) {
+      setErrorMessage("먼저 AI 사건 정리를 완료해주세요.");
+      return;
+    }
+    if (mode === "precedent" && !record.selectedPrecedentAiSummary) {
       setErrorMessage("먼저 판례 상세 분석을 완료해주세요.");
       return;
     }
 
-    setLoadingVerdict(true);
+    if (mode === "standalone") {
+      setLoadingStandaloneVerdict(true);
+    } else {
+      setLoadingPrecedentVerdict(true);
+    }
     setErrorMessage("");
     try {
       const response = await fetch("/api/ai/verdict", {
@@ -358,8 +472,9 @@ export default function Home() {
           legalFields: record.legalFields,
           answers: record.answers,
           aiCaseSummary: record.aiSummary,
-          selectedPrecedent: record.selectedPrecedent,
-          selectedPrecedentAiSummary: record.selectedPrecedentAiSummary,
+          selectedPrecedent: mode === "precedent" ? record.selectedPrecedent : undefined,
+          selectedPrecedentAiSummary:
+            mode === "precedent" ? record.selectedPrecedentAiSummary : undefined,
         }),
       });
       const payload = (await response.json()) as {
@@ -383,14 +498,28 @@ export default function Home() {
         throw new Error("AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요.");
       }
 
-      const nextRecord: SavedCaseRecord = {
-        ...record,
+      const analysis: AiVerdictAnalysis = {
         comparison: payload.data.comparison,
         responsibilityAnalysis: payload.data.responsibilityAnalysis,
         sentencingAnalysis: payload.data.sentencingAnalysis,
         verdict: payload.data.verdict,
-        updatedAt: new Date().toISOString(),
       };
+      const nextRecord: SavedCaseRecord =
+        mode === "standalone"
+          ? {
+              ...record,
+              standaloneVerdictAnalysis: analysis,
+              updatedAt: new Date().toISOString(),
+            }
+          : {
+              ...record,
+              precedentVerdictAnalysis: analysis,
+              comparison: payload.data.comparison,
+              responsibilityAnalysis: payload.data.responsibilityAnalysis,
+              sentencingAnalysis: payload.data.sentencingAnalysis,
+              verdict: payload.data.verdict,
+              updatedAt: new Date().toISOString(),
+            };
       setRecord(nextRecord);
       saveCurrentRecord(nextRecord);
     } catch (error) {
@@ -398,8 +527,20 @@ export default function Home() {
         error instanceof Error ? error.message : "AI 판결문 생성에 실패했습니다.",
       );
     } finally {
-      setLoadingVerdict(false);
+      if (mode === "standalone") {
+        setLoadingStandaloneVerdict(false);
+      } else {
+        setLoadingPrecedentVerdict(false);
+      }
     }
+  };
+
+  const handleGenerateStandaloneVerdict = async () => {
+    await requestVerdict("standalone");
+  };
+
+  const handleGeneratePrecedentVerdict = async () => {
+    await requestVerdict("precedent");
   };
 
   return (
@@ -456,7 +597,24 @@ export default function Home() {
               values={record.legalFields as LegalField[]}
               onChange={(legalFields) => updateRecord({ legalFields })}
               onPrev={() => setMainStep("caseType")}
-              onNext={() => setMainStep("questions")}
+              onNext={() => setMainStep("inputMode")}
+            />
+          )}
+
+          {mainStep === "inputMode" && (
+            <InputModeSelector
+              value={(record.inputMode ?? "step") as InputMode}
+              onSelect={(mode) => {
+                setErrorMessage("");
+                updateRecord({ inputMode: mode });
+                if (mode === "single") {
+                  setMainStep("singleInput");
+                  return;
+                }
+                setQuestionIndex(0);
+                setMainStep("questions");
+              }}
+              onPrev={() => setMainStep("legalFields")}
             />
           )}
 
@@ -479,7 +637,7 @@ export default function Home() {
                 if (questionIndex > 0) {
                   setQuestionIndex((prev) => prev - 1);
                 } else {
-                  setMainStep("legalFields");
+                  setMainStep("inputMode");
                 }
               }}
               onNext={handleQuestionNext}
@@ -504,6 +662,24 @@ export default function Home() {
             />
           )}
 
+          {mainStep === "singleInput" && (
+            <SingleInputPanel
+              value={record.singleInput ?? ""}
+              errorMessage={errorMessage}
+              onChange={(singleInput) => {
+                if (errorMessage) {
+                  setErrorMessage("");
+                }
+                updateRecord({ singleInput });
+              }}
+              onPrev={() => {
+                setErrorMessage("");
+                setMainStep("inputMode");
+              }}
+              onSubmit={handleSingleInputSubmit}
+            />
+          )}
+
           {mainStep === "summary" && record.aiSummary && (
             <AiSummaryPanel
               summary={record.aiSummary}
@@ -512,6 +688,10 @@ export default function Home() {
                 setErrorMessage("");
               }}
               onEdit={() => {
+                if (record.inputMode === "single") {
+                  setMainStep("singleInput");
+                  return;
+                }
                 setMainStep("questions");
                 setQuestionIndex(0);
               }}
@@ -525,6 +705,10 @@ export default function Home() {
                 onProceedToSearch={() => undefined}
                 showProceedButton={false}
                 onEdit={() => {
+                  if (record.inputMode === "single") {
+                    setMainStep("singleInput");
+                    return;
+                  }
                   setMainStep("questions");
                   setQuestionIndex(0);
                 }}
@@ -537,21 +721,24 @@ export default function Home() {
                 selectedPrecedent={record.selectedPrecedent}
                 selectedPrecedentDetail={record.selectedPrecedentDetail}
                 selectedPrecedentAiSummary={record.selectedPrecedentAiSummary}
-                comparison={record.comparison}
-                responsibilityAnalysis={record.responsibilityAnalysis}
-                sentencingAnalysis={record.sentencingAnalysis}
-                verdict={record.verdict}
+                standaloneVerdictAnalysis={record.standaloneVerdictAnalysis}
+                precedentVerdictAnalysis={
+                  record.precedentVerdictAnalysis ?? legacyPrecedentVerdictAnalysis
+                }
                 loadingSearch={loadingPrecedentSearch}
                 loadingDetail={loadingPrecedentDetail}
-                loadingVerdict={loadingVerdict}
+                loadingStandaloneVerdict={loadingStandaloneVerdict}
+                loadingPrecedentVerdict={loadingPrecedentVerdict}
                 errorMessage={errorMessage}
                 onSearch={handleSearchPrecedents}
                 onViewDetail={handleLoadPrecedentDetail}
-                onGenerateVerdict={handleGenerateVerdict}
+                onGenerateStandaloneVerdict={handleGenerateStandaloneVerdict}
+                onGeneratePrecedentVerdict={handleGeneratePrecedentVerdict}
                 onSelect={(item) => {
                   const nextRecord: SavedCaseRecord = {
                     ...record,
                     selectedPrecedent: item,
+                    precedentVerdictAnalysis: undefined,
                     comparison: undefined,
                     responsibilityAnalysis: undefined,
                     sentencingAnalysis: undefined,
@@ -566,9 +753,18 @@ export default function Home() {
           )}
 
           {loadingSummary && (
-            <p className="mt-4 text-sm text-indigo-700">
-              AI가 사건을 정리하고 있어요. 잠시만 기다려주세요.
-            </p>
+            <div className="mt-4 rounded-lg border border-indigo-100 bg-indigo-50 p-3">
+              <p className="text-sm text-indigo-700">
+                AI가 사건을 정리하고 있어요. 잠시만 기다려주세요.
+              </p>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-indigo-100">
+                <div
+                  className="h-full bg-indigo-600 transition-all duration-300"
+                  style={{ width: `${summaryProgress}%` }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-indigo-700">{summaryProgress}%</p>
+            </div>
           )}
 
           {errorMessage &&

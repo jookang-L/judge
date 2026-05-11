@@ -12,15 +12,44 @@ const LAW_API_BASE_URL = "https://www.law.go.kr/DRF";
 function pickText(record: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
     const value = record[key];
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
+    const text = extractText(value);
+    if (text) {
+      return text;
     }
-    if (typeof value === "number" || typeof value === "bigint") {
-      return String(value);
+  }
+  return "";
+}
+
+function extractText(value: unknown): string {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((item) => extractText(item))
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    return joined;
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const preferred = extractText(obj["#text"] ?? obj["text"] ?? obj["_text"] ?? obj["content"]);
+    if (preferred) {
+      return preferred;
     }
-    if (typeof value === "boolean") {
-      return value ? "true" : "false";
-    }
+    const nested = Object.values(obj)
+      .map((item) => extractText(item))
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    return nested;
   }
   return "";
 }
@@ -166,12 +195,44 @@ export async function fetchPrecedentDetail(id: string, lawApiKey?: string): Prom
     (parsed["PrecService"] as Record<string, unknown> | undefined) ??
     (parsed["판례정보"] as Record<string, unknown> | undefined) ??
     parsed;
+  const infoNode =
+    (root["판례정보"] as Record<string, unknown> | undefined) ??
+    (root["prec"] as Record<string, unknown> | undefined) ??
+    root;
 
-  const body = pickText(root, ["판시사항", "판결요지", "판결내용", "판결문", "본문", "내용"]);
-  const caseName = pickText(root, ["사건명", "caseNm"]);
-  const caseNumber = pickText(root, ["사건번호", "caseNo"]);
-  const courtName = pickText(root, ["법원명", "courtNm"]);
-  const decisionDate = normalizeDate(pickText(root, ["선고일자", "선고일", "date"]));
+  const bodyKeys = [
+    "판례내용",
+    "판례전문",
+    "전문",
+    "판결문",
+    "판결내용",
+    "판시사항",
+    "판시사항내용",
+    "판결요지",
+    "판결요지내용",
+    "주문",
+    "이유",
+    "본문",
+    "내용",
+  ];
+  const body = pickText(infoNode, bodyKeys) || pickText(root, bodyKeys);
+  const broadFallbackBody = extractText(infoNode) || extractText(root);
+  const caseName = pickText(infoNode, ["사건명", "caseNm"]) || pickText(root, ["사건명", "caseNm"]);
+  const caseNumber =
+    pickText(infoNode, ["사건번호", "caseNo"]) || pickText(root, ["사건번호", "caseNo"]);
+  const courtName = pickText(infoNode, ["법원명", "courtNm"]) || pickText(root, ["법원명", "courtNm"]);
+  const decisionDate = normalizeDate(
+    pickText(infoNode, ["선고일자", "선고일", "date"]) ||
+      pickText(root, ["선고일자", "선고일", "date"]),
+  );
+
+  if (!body) {
+    const infoNodeKeys = Object.keys(infoNode).slice(0, 30);
+    const rootKeys = Object.keys(root).slice(0, 30);
+    console.warn(
+      `[law-api] precedent detail body missing. id=${id} infoNodeKeys=${infoNodeKeys.join(",")} rootKeys=${rootKeys.join(",")}`,
+    );
+  }
 
   return {
     id,
@@ -179,6 +240,9 @@ export async function fetchPrecedentDetail(id: string, lawApiKey?: string): Prom
     caseNumber,
     courtName,
     decisionDate,
-    fullText: body || "본문을 불러왔지만 내용을 찾지 못했습니다.",
+    fullText:
+      body ||
+      broadFallbackBody ||
+      "본문을 불러왔지만 내용을 찾지 못했습니다.",
   };
 }

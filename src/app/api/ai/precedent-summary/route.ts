@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import {
   createGeminiClient,
   extractJsonFromResponse,
-  GEMINI_DEFAULT_MODEL,
+  extractProviderErrorMessage,
+  generateContentWithRetry,
+  isRetryableModelError,
 } from "@/lib/gemini";
 import type { AiCaseSummary, CaseType, PrecedentDetail } from "@/types/case";
 
@@ -13,34 +15,6 @@ type Body = {
   aiCaseSummary?: AiCaseSummary;
   precedentDetail?: PrecedentDetail;
 };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function extractErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-function isRetryableProviderError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes("503") ||
-    lower.includes("unavailable") ||
-    lower.includes("high demand") ||
-    lower.includes("temporarily") ||
-    lower.includes("try again later")
-  );
-}
 
 export async function POST(request: Request) {
   try {
@@ -99,37 +73,18 @@ ${precedentDetail.fullText}
 `.trim();
 
     const ai = createGeminiClient(apiKey);
-    let lastErrorMessage = "";
-    let parsed: unknown = null;
-
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        const response = await ai.models.generateContent({
-          model: GEMINI_DEFAULT_MODEL,
-          contents: prompt,
-        });
-        const text = response.text ?? "";
-        const jsonText = extractJsonFromResponse(text);
-        parsed = JSON.parse(jsonText);
-        break;
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        lastErrorMessage = message;
-        if (!isRetryableProviderError(message) || attempt === 3) {
-          throw error;
-        }
-        await sleep(800 * attempt);
-      }
-    }
-
-    if (!parsed) {
-      throw new Error(lastErrorMessage || "판례 요약 AI 분석 결과가 비어 있습니다.");
-    }
+    const response = await generateContentWithRetry({
+      ai,
+      contents: prompt,
+    });
+    const text = response.text ?? "";
+    const jsonText = extractJsonFromResponse(text);
+    const parsed = JSON.parse(jsonText);
 
     return NextResponse.json({ data: parsed });
   } catch (error) {
-    const message = extractErrorMessage(error);
-    if (isRetryableProviderError(message)) {
+    const message = extractProviderErrorMessage(error);
+    if (isRetryableModelError(message)) {
       return NextResponse.json(
         {
           error:

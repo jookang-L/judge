@@ -4,11 +4,8 @@ import { useMemo, useState } from "react";
 
 import { VerdictPanel } from "@/components/verdict-panel";
 import type {
-  AiComparison,
   AiPrecedentSummary,
-  AiResponsibilityAnalysis,
-  AiSentencingAnalysis,
-  AiVerdict,
+  AiVerdictAnalysis,
   PrecedentDetail,
   PrecedentItem,
 } from "@/types/case";
@@ -21,19 +18,36 @@ type Props = {
   selectedPrecedent?: PrecedentItem;
   selectedPrecedentDetail?: PrecedentDetail;
   selectedPrecedentAiSummary?: AiPrecedentSummary;
-  comparison?: AiComparison;
-  responsibilityAnalysis?: AiResponsibilityAnalysis;
-  sentencingAnalysis?: AiSentencingAnalysis;
-  verdict?: AiVerdict;
+  standaloneVerdictAnalysis?: AiVerdictAnalysis;
+  precedentVerdictAnalysis?: AiVerdictAnalysis;
   loadingSearch: boolean;
   loadingDetail: boolean;
-  loadingVerdict: boolean;
+  loadingStandaloneVerdict: boolean;
+  loadingPrecedentVerdict: boolean;
   errorMessage: string;
   onSearch: (keywords: string[]) => Promise<void>;
   onViewDetail: (item: PrecedentItem) => Promise<void>;
-  onGenerateVerdict: () => Promise<void>;
+  onGenerateStandaloneVerdict: () => Promise<void>;
+  onGeneratePrecedentVerdict: () => Promise<void>;
   onSelect: (item: PrecedentItem) => void;
 };
+
+const TOP_WEIGHTED_TERMS_FOR_SCORING = 8;
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+function compactText(value: string): string {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
+function tokenizeText(value: string): string[] {
+  return normalizeText(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
 
 export function PrecedentSearchPanel({
   keywords,
@@ -43,17 +57,17 @@ export function PrecedentSearchPanel({
   selectedPrecedent,
   selectedPrecedentDetail,
   selectedPrecedentAiSummary,
-  comparison,
-  responsibilityAnalysis,
-  sentencingAnalysis,
-  verdict,
+  standaloneVerdictAnalysis,
+  precedentVerdictAnalysis,
   loadingSearch,
   loadingDetail,
-  loadingVerdict,
+  loadingStandaloneVerdict,
+  loadingPrecedentVerdict,
   errorMessage,
   onSearch,
   onViewDetail,
-  onGenerateVerdict,
+  onGenerateStandaloneVerdict,
+  onGeneratePrecedentVerdict,
   onSelect,
 }: Props) {
   const [keywordText, setKeywordText] = useState(keywords.join(", "));
@@ -90,35 +104,73 @@ export function PrecedentSearchPanel({
       }
     }
 
-    return Array.from(map.values());
+    return Array.from(map.values())
+      .map(({ term, weight, label }) => ({
+        term,
+        weight,
+        label,
+        normalized: normalizeText(term),
+        compact: compactText(term),
+        tokens: tokenizeText(term),
+      }))
+      .sort((a, b) => b.weight - a.weight);
   }, [keywords, aiKeywordTerms, issueTerms]);
 
-  const scoredPrecedents = useMemo(
-    () =>
-      precedents.map((item) => {
-        const target = `${item.caseName} ${item.summary}`.toLowerCase();
-        const matchedTerms = weightedTerms.filter(({ term }) => target.includes(term.toLowerCase()));
-        const matchedWeight = matchedTerms.reduce((acc, current) => acc + current.weight, 0);
-        const totalWeight = Math.max(
-          1,
-          weightedTerms.reduce((acc, current) => acc + current.weight, 0),
-        );
-        const score = Math.min(100, Math.round((matchedWeight / totalWeight) * 100));
-        const level: "high" | "medium" | "low" =
-          score >= 60 ? "high" : score >= 30 ? "medium" : "low";
-        const oneLineSummary =
-          matchedTerms.length > 0
-            ? `가중치 매칭: ${matchedTerms
-                .sort((a, b) => b.weight - a.weight)
-                .slice(0, 3)
-                .map((term) => `${term.term}(${term.label})`)
-                .join(", ")}`
-            : "핵심 키워드 직접 매칭은 낮지만 사건명을 확인해볼 가치가 있습니다.";
+  const scoredPrecedents = useMemo(() => {
+    const scoringTerms = weightedTerms.slice(0, TOP_WEIGHTED_TERMS_FOR_SCORING);
+    const totalWeight = Math.max(
+      1,
+      scoringTerms.reduce((acc, current) => acc + current.weight, 0),
+    );
 
-        return { item, score, level, oneLineSummary };
-      }),
-    [precedents, weightedTerms],
-  );
+    const scored = precedents.map((item) => {
+      const targetText = `${item.caseName} ${item.summary}`;
+      const targetNormalized = normalizeText(targetText);
+      const targetCompact = compactText(targetText);
+      const targetTokenSet = new Set(tokenizeText(targetText));
+
+      const matchedTerms = scoringTerms.filter((term) => {
+        if (term.normalized && targetNormalized.includes(term.normalized)) {
+          return true;
+        }
+        if (term.compact && targetCompact.includes(term.compact)) {
+          return true;
+        }
+        if (term.tokens.length === 0) {
+          return false;
+        }
+        const matchedTokenCount = term.tokens.filter((token) => targetTokenSet.has(token)).length;
+        return matchedTokenCount / term.tokens.length >= 0.6;
+      });
+
+      const matchedWeight = matchedTerms.reduce((acc, current) => acc + current.weight, 0);
+      const rawScore = Math.min(100, Math.round((matchedWeight / totalWeight) * 100));
+
+      return { item, rawScore, matchedTerms };
+    });
+
+    const maxRawScore = scored.reduce((max, current) => Math.max(max, current.rawScore), 0);
+
+    return scored.map(({ item, rawScore, matchedTerms }) => {
+      const score =
+        maxRawScore > 0
+          ? Math.min(100, Math.round(rawScore * 0.7 + (rawScore / maxRawScore) * 30))
+          : 0;
+      const level: "high" | "medium" | "low" =
+        score >= 60 ? "high" : score >= 30 ? "medium" : "low";
+      const oneLineSummary =
+        matchedTerms.length > 0
+          ? `가중치 매칭: ${matchedTerms
+              .slice()
+              .sort((a, b) => b.weight - a.weight)
+              .slice(0, 3)
+              .map((term) => `${term.term}(${term.label})`)
+              .join(", ")}`
+          : "핵심 키워드 직접 매칭은 낮지만 사건명을 확인해볼 가치가 있습니다.";
+
+      return { item, score, level, oneLineSummary };
+    });
+  }, [precedents, weightedTerms]);
 
   const visiblePrecedents = useMemo(
     () =>
@@ -315,12 +367,13 @@ export function PrecedentSearchPanel({
       )}
 
       <VerdictPanel
-        comparison={comparison}
-        responsibilityAnalysis={responsibilityAnalysis}
-        sentencingAnalysis={sentencingAnalysis}
-        verdict={verdict}
-        loading={loadingVerdict}
-        onGenerate={onGenerateVerdict}
+        standaloneAnalysis={standaloneVerdictAnalysis}
+        precedentAnalysis={precedentVerdictAnalysis}
+        loadingStandalone={loadingStandaloneVerdict}
+        loadingPrecedent={loadingPrecedentVerdict}
+        hasPrecedentContext={Boolean(selectedPrecedentAiSummary)}
+        onGenerateStandalone={onGenerateStandaloneVerdict}
+        onGenerateWithPrecedent={onGeneratePrecedentVerdict}
       />
 
       {errorMessage && (

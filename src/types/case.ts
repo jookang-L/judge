@@ -29,6 +29,8 @@ export type QuestionKey =
 
 export type QuestionAnswers = Record<QuestionKey, string>;
 
+export type InputMode = "step" | "single";
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -103,12 +105,18 @@ export type AiVerdictDraft = {
   title: string;
   decision: string;
   reasoning: string[];
-  educationalMessage: string;
 };
 
 export type AiVerdict = {
   verdictOptions: AiVerdictDraft[];
   classDiscussionQuestions: string[];
+};
+
+export type AiVerdictAnalysis = {
+  comparison: AiComparison;
+  responsibilityAnalysis: AiResponsibilityAnalysis;
+  sentencingAnalysis: AiSentencingAnalysis;
+  verdict: AiVerdict;
 };
 
 export type SavedCaseRecord = {
@@ -118,6 +126,8 @@ export type SavedCaseRecord = {
   title: string;
   caseType: CaseType;
   legalFields: LegalField[];
+  inputMode?: InputMode;
+  singleInput?: string;
   answers: QuestionAnswers;
   aiSummary?: AiCaseSummary;
   searchKeywords: string[];
@@ -125,6 +135,8 @@ export type SavedCaseRecord = {
   selectedPrecedent?: PrecedentItem;
   selectedPrecedentDetail?: PrecedentDetail;
   selectedPrecedentAiSummary?: AiPrecedentSummary;
+  standaloneVerdictAnalysis?: AiVerdictAnalysis;
+  precedentVerdictAnalysis?: AiVerdictAnalysis;
   comparison?: AiComparison;
   responsibilityAnalysis?: AiResponsibilityAnalysis;
   sentencingAnalysis?: AiSentencingAnalysis;

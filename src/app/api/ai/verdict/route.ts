@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { createGeminiClient, extractJsonFromResponse, GEMINI_DEFAULT_MODEL } from "@/lib/gemini";
+import {
+  createGeminiClient,
+  extractJsonFromResponse,
+  extractProviderErrorMessage,
+  generateContentWithRetry,
+  isRetryableModelError,
+} from "@/lib/gemini";
 import { buildVerdictPrompt } from "@/lib/prompts";
 import type { AiCaseSummary, AiPrecedentSummary, CaseType, LegalField, QuestionAnswers } from "@/types/case";
 
@@ -47,13 +53,6 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!selectedPrecedentAiSummary) {
-      return NextResponse.json(
-        { error: "판례 비교 요약 데이터가 없습니다. 먼저 판례 상세 분석을 완료해주세요." },
-        { status: 400 },
-      );
-    }
-
     const prompt = buildVerdictPrompt({
       caseType: caseType ?? "모름",
       legalFields: legalFields ?? [],
@@ -81,8 +80,8 @@ export async function POST(request: Request) {
     });
 
     const ai = createGeminiClient(apiKey);
-    const response = await ai.models.generateContent({
-      model: GEMINI_DEFAULT_MODEL,
+    const response = await generateContentWithRetry({
+      ai,
       contents: prompt,
     });
 
@@ -92,8 +91,17 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ data: parsed });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "AI 판결문 생성 중 오류가 발생했습니다.";
+    const message = extractProviderErrorMessage(error);
+
+    if (isRetryableModelError(message)) {
+      return NextResponse.json(
+        {
+          error:
+            "현재 AI 모델 요청이 많아 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.",
+        },
+        { status: 503 },
+      );
+    }
 
     if (message.toLowerCase().includes("api key")) {
       return NextResponse.json(
